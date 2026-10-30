@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>FaceAttend</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #111; color: #eee; }
+  .wrap { display: flex; gap: 16px; padding: 16px; }
+  video, canvas { width: 640px; height: 480px; background: #000; border-radius: 8px; }
+  .panel { flex: 1; max-width: 360px; }
+  .row { margin: 8px 0; }
+  button { padding: 8px 12px; border-radius: 6px; border: none; cursor: pointer; }
+  .log { font-size: 12px; max-height: 300px; overflow: auto; background: #1a1a1a; padding: 8px; border-radius: 6px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  .known { background: #1f7a3d; } .unknown { background: #a33; } .spoof { background: #a37a00; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+    <div class="row">
+      <button id="start">Start camera</button>
+      <button id="stop">Stop</button>
+      <span id="fps"></span>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Faces</h3>
+    <div id="faces"></div>
+    <h3>Attendance</h3>
+    <div id="att" class="log"></div>
+  </div>
+</div>
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let ws = null;
+let running = false;
+let timer = null;
+
+async function startCam() {
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+  video.srcObject = stream;
+  await video.play();
+  ws = new WebSocket('ws://' + location.host + '/ws/recognize');
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.error) { console.error(msg.error); return; }
+    draw(msg);
+    document.getElementById('fps').textContent = msg.fps.toFixed(1) + ' FPS';
+    if (running) setTimeout(loop, 0);
+  };
+  running = true;
+  loop();
+}
+
+function stopCam() {
+  running = false;
+  if (timer) clearTimeout(timer);
+  if (ws) ws.close();
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  video.srcObject = null;
+}
+
+function loop() {
+  if (!running) return;
+  const c = document.createElement('canvas');
+  c.width = video.videoWidth || 640;
+  c.height = video.videoHeight || 480;
+  const cx = c.getContext('2d');
+  cx.drawImage(video, 0, 0, c.width, c.height);
+  c.toBlob((blob) => {
+    if (ws && ws.readyState === 1) ws.send(blob);
+  }, 'image/jpeg', 0.6);
+}
+// send next frame only after server responds (no queue buildup)
+const _origOnMessage = null;
+
+
+function draw(msg) {
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const facesDiv = document.getElementById('faces');
+  facesDiv.innerHTML = '';
+  for (const f of msg.faces) {
+    const {x1,y1,x2,y2} = f.bbox;
+    const sx = canvas.width / (video.videoWidth || 640);
+    const sy = canvas.height / (video.videoHeight || 480);
+    ctx.strokeStyle = f.is_unknown ? '#f33' : '#3f7';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x1*sx, y1*sy, (x2-x1)*sx, (y2-y1)*sy);
+    ctx.fillStyle = f.is_unknown ? '#f33' : '#3f7';
+    const label = f.is_unknown ? 'Unknown' : (f.name + ' ' + (1-f.distance).toFixed(2));
+    ctx.fillText(label, x1*sx, y1*sy - 4);
+    const badge = document.createElement('div');
+    badge.className = 'badge ' + (f.is_unknown ? 'unknown' : (f.liveness && !f.liveness.is_live ? 'spoof' : 'known'));
+    badge.textContent = (f.name || 'Unknown') + ' ' + (f.liveness ? ('live:' + f.liveness.is_live) : '');
+    facesDiv.appendChild(badge);
+  }
+}
+
+document.getElementById('start').onclick = startCam;
+document.getElementById('stop').onclick = stopCam;
+</script>
+</body>
+</html>
